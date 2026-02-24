@@ -48,6 +48,10 @@ The peak bloom date of the Prunus jamasakura is determined by a local news paper
 Data prior to 1888 is extracted from various descriptions or estimated.
 See the source for details.
 
+### weather_clean_data
+
+If the API key does not properly function in the code and this data set is loaded into the environment, you can skip to part four of the code to run the model and predictions. 
+
 ###### Copyright notice
 
 Copyright holder Yasuyuki AONO (aono(at)envi.osakafu-u.ac.jp).
