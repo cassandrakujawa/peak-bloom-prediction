@@ -1,0 +1,905 @@
+---
+title: "Petals, Patterns, and Predictions: A Random Forest Model to Forecast the Peak Cherry Blossom Bloom Dates from Global Climate Data"
+author: "Cassandra Kujawa"
+format: html
+editor: visual
+---
+
+```{r}
+#| label: setup
+#| include: false
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, error = FALSE, 
+                      message = FALSE,
+                      fig.align = 'center',
+                      out.width = '80%')
+options(noaakey = "YOUR API KEY HERE")
+```
+
+### Abstract
+
+Predicting peak cherry blossom bloom dates is essential for tourism, bioclimatic modeling, and phenological research. Cherry blossom peak bloom is highly sensitive to countless biological factors that are both local and global. Peak bloom is influenced by complex interactions among temperatures, weather oscillation patterns, dormancy requirements, and long-term climate change. This study develops a data-driven random forest model that combines several climatological parameters to estimate the cherry blossom peak bloom timing for five different cities: Washington, D.C.; Kyoto, Japan; Liestal, Switzerland; Vancouver, Canada; and New York City for 2026.
+
+Historical peak bloom data through 2025 were combined with daily meteorological records collected from NOAA, NASA, and AccuWeather web sources. Information derived from these sources that were the primary phenological predictors were, daily maximum and minimum temperatures, precipitation, and solar radiation. In addition, other factors that were also primary predictors were growing degree days and chilling accumulation, which were calculated from the variables listed above. To further predict the phenological response to warming, global CO2 concentrations and global temperature anomalies, along with the El Nino-Southern Oscillation trends and the Oceanic Nino Index. Given the historical depth of meteorological records incorporated, there were extensive gaps in the early years documented. The discontinuities were addressed using interpolation that filled missing data, which upheld atmospheric dynamic patterns while preserving stochastic variance.
+
+When training the random forest model, the daily biological predictors were aggregated into annual summaries for every location. Since the data for 2026 is incomplete, the short-term temperature forecasts were manually integrated for February through mid-April. The global climate indicators, specifically CO2 concentrations, global temperature anomalies, El Nino-Southern Oscillation trends, and the Oceanic Nino Index were extrapolated based on the most recent patterns. This allowed the model to function using projected environmental scenarios without relying on latent data points.
+
+Random forests were selected for the capability to model nonlinear relationships and interactions without stringent parametric assumptions. To reduce the risk of extreme outliers and improbable predictions, using each city's most recent ten-year peak bloom window, a constraint was applied to ensure that the forecast remained realistic with examined historical fluctuations.
+
+This model provides a resulting location-based peak bloom date predictions for 2026 that considers both local weather variations and global climate impacts. Analyzing variable importance, it highlights global temperature anomalies, CO2 concentrations, and El Nino-Southern Oscillation trends as the most dominant predictors. Overall, this model demonstrates how combining long-term atmospheric signatures with biological threshold parameters can advance the robustness of phenological projections. This modeling framework is flexible and can be extended for future applications to other species, locations, and climates as meteorological fluctuations continue to shape seasonal biological events.
+
+### 1. Setup
+
+The packages used can be installed via
+
+```{r}
+#| eval: false
+install.packages('tidyverse')
+install.packages("knitr")
+install.packages("kableExtra")
+install.packages("tidyverse")
+install.packages("plotly")
+install.packages("rnoaa")
+install.packages("rnpn")
+install.packages("rvest")
+install.packages("nasapower") 
+install.packages("chillR") 
+install.packages("ranger")
+install.packages("tidymodels") 
+install.packages("vip") 
+install.packages("lubridate") 
+install.packages("kableExtra") 
+install.packages("climatrends")
+install.packages("httr2")
+install.packages("jsonlite")
+install.packages("tidyr")
+install.packages("zoo")
+install.packages("rsoi")
+
+# Since the rnoaa package was archived from CRAN, run this statement to download the package 
+if (!require(rnoaa)) {
+  remotes::install_github("ropensci/rnoaa")
+}
+library(rnoaa)
+
+```
+
+and then loaded via
+
+```{r}
+library("tidyverse")
+library("knitr")
+library("kableExtra")
+library("tidyverse")
+library("plotly")
+library("rnoaa")
+library("rnpn")
+library("rvest")
+library("rnoaa") 
+library("nasapower") 
+library("chillR") 
+library("ranger")
+library("tidymodels") 
+library("vip") 
+library("lubridate") 
+library("kableExtra") 
+library("climatrends")
+library("httr2")
+library("jsonlite")
+library("ggplot2")
+library("tidyr")
+library("zoo")
+library("rsoi")
+```
+
+### 2. Loading the Data
+
+The data files only show peak bloom dates available up to 2024.
+
+```{r}
+cherry <- read.csv("data/washingtondc.csv") |> 
+  bind_rows(read.csv("data/liestal.csv")) |> 
+  bind_rows(read.csv("data/kyoto.csv")) |> 
+  bind_rows(read.csv("data/vancouver.csv")) |> 
+  bind_rows(read.csv("data/nyc.csv"))
+```
+
+The 2025 peak bloom information is added to the dataset.
+
+```{r}
+# Manually adding the 2025 bloom date information, and the longitude, latitude, and altitude for each of the five cities for 2025. 
+actual_2025 <- tibble(
+  location = c("washingtondc", "kyoto", "liestal", "vancouver", "nyc"),
+  lat = c(38.8853496, 35.0119831, 47.4814, 49.2237, 40.7304),
+  long = c(-77.0386278, 135.6761135, 7.730519, -123.1636, -73.99809),
+  alt = c(0, 44, 350, 24, 8.5), 
+  year = 2025,
+  bloom_date = c("2025-03-28", "2025-04-05", "2025-04-03", "2025-04-03", "2025-04-12"),
+  bloom_doy = c(87, 95, 93, 93, 102)
+)
+
+# Combining with existing peak bloom data
+cherry_updated <- cherry %>%
+  bind_rows(actual_2025) %>%
+  arrange(location, year)
+
+# Adding the latitude, longitude, and altitude variables using previous years data
+cherry_updated <- cherry %>%
+  bind_rows(actual_2025) %>%
+  # Fixing name inconsistencies (if one was "newyorkcity" and the other was "nyc")
+  mutate(location = case_when(str_detect(location, "nyc|newyork") ~ "nyc", TRUE ~ location)) %>%
+  # Filling in any NAs for latitude, longitude, and altitude variables
+  group_by(location) %>%
+  fill(lat, long, alt, .direction = "downup") %>%
+  ungroup() %>%
+  arrange(location, year)
+```
+
+For this analysis, the factors that will be analyzed are growing degree days, dormancy days, daily temperatures, El Nino and La Nina weather patterns, precipitation, solar radiation, global C02 concentration, and the overall global temperature.
+
+Below the historical weather data is retrieved.
+
+```{r}
+# Station IDs from NOAA
+stations <- c(
+  "washingtondc" = "USW00013743",
+  "vancouver"    = "CA001108395",
+  "nyc"          = "USW00094728",
+  "liestal"      = "SZ000001940",
+  "kyoto"        = "JA000047759")
+
+# Getting the raw weather data for all five cities, particularly maximum temperatures, minimum temperatures, and precipitation for everyday of the year since 1735 (where the data is available)
+noaa_weather_oldest <- meteo_pull_monitors(
+  stations, 
+  var = c("TMAX", "TMIN", "PRCP"),
+  date_min = "1735-01-01") %>%
+  rename(location = id) %>%
+  mutate(location = names(stations)[match(location, stations)],
+         Tmax = tmax / 10, 
+         Tmin = tmin / 10,
+         Precip = prcp / 10)
+```
+
+All the data for the five cities was pulled as far back as NOAA has existed. This means that there are large gaps in the data, since the weather has not been recorded consistently since that time. The cherry blossom bloom dates do not exist as far back as 1735, but it is crucial to understand historical weather pattern for the prediction model.
+
+The graph below shows where there are large gaps in the data from NOAA.
+
+```{r}
+# Creating a table to see how many NAs there are
+data_check <- noaa_weather_oldest %>%
+  # Extracting the year from the 'date' column 
+  mutate(Year = year(date)) %>% 
+  group_by(location, Year) %>%
+  summarize(
+    # Counting what percent of Tmax entries are NA
+    missing_pct = sum(is.na(Tmax)) / n() * 100,
+    .groups = "drop"
+  )
+
+# Exploratory data analysis of the gaps. Creating a heat map of the data to visualize where the data is unreliable.   
+ggplot(data_check, aes(x = Year, y = location, fill = missing_pct)) +
+  geom_tile() +
+  scale_fill_gradient(low = "skyblue", high = "red") +
+  theme_minimal() +
+  labs(
+    title = "Weather Data Gaps (1869 - 2026)",
+    subtitle = "Red tiles indicate years with missing temperature records",
+    x = "Year",
+    y = "City",
+    fill = "% Missing"
+  )
+```
+
+The years that are blue show the data is consistent and reliable. The years that have red show that there is a significant portion of the data that is missing.
+
+Because there is a large number of gaps in the data, linear interpolation, a way to estimate unknown values that are between two points by assuming there is a linear relationship, is used. The code only patches gaps that are a few days apart.
+
+```{r}
+weather_patched <- noaa_weather_oldest %>%
+  mutate(
+    Year = year(date),
+    Month = month(date),
+    Day = day(date)) %>%
+  # Sort everything by city and date
+  arrange(location, date) %>%
+  group_by(location) %>%
+  # Filling NAs by interpolating between the nearest known values for three days or less. Longer gaps stay NA.
+  mutate(
+    Tmax = na.approx(Tmax, maxgap = 3, na.rm = FALSE),
+    Tmin = na.approx(Tmin, maxgap = 3, na.rm = FALSE)
+  ) %>%
+  ungroup()
+
+# Checks to see how many missing values there are for each city's temperature history after filling in gaps that have missing data for three days or less
+weather_patched %>% 
+  group_by(location) %>% 
+  summarize(rows = n(), missing_Tmax = sum(is.na(Tmax)))
+```
+
+Next, the global temperatures, global C02 levels, will be obtained and added to the data set.
+
+NOAA does not have the global C02 levels or the average global temperatures available, so these data will be retrived from NASA.
+
+```{r}
+# Obtaining NASA data for each location
+sites <- tibble(
+  location = c("washingtondc", "kyoto", "liestal", "vancouver", "nyc"),
+  lat = c(38.8853496, 35.0119831, 47.4814, 49.2237, 40.7304),
+  lon = c(-77.0386278, 135.6761135, 7.730519, -123.1636, -73.99809))
+
+nasa_fusion <- map_dfr(1:nrow(sites), function(i) {
+  get_power(
+    community = "ag",
+    lonlat = c(sites$lon[i], sites$lat[i]),
+    pars = c("ALLSKY_SFC_SW_DWN", "PRECTOTCORR"),
+    dates = c("1981-01-01", "2026-01-31"), # Up to today
+    temporal_api = "daily"
+  ) %>% 
+    mutate(location = sites$location[i])
+}) %>%
+  rename(date = YYYYMMDD, Solar = ALLSKY_SFC_SW_DWN, Precip_NASA = PRECTOTCORR)
+
+# Obtaining C02 data
+co2_url <- "https://gml.noaa.gov/webdata/ccgg/trends/co2/co2_annmean_mlo.txt"
+co2_data <- read.table(co2_url, col.names = c("Year", "CO2", "unc")) %>%
+  select(Year, CO2)
+
+# Getting the global average temperatures
+temp_url <- "https://data.giss.nasa.gov/gistemp/tabledata_v4/GLB.Ts+dSST.csv"
+global_temp <- read_csv(temp_url, skip = 1, na = "***") %>%
+  select(Year = Year, Global_Anomaly = `J-D`) %>%
+  mutate(Year = as.numeric(Year))
+
+# Ensuring dates are in the exact same format before joining
+weather_patched <- weather_patched %>% mutate(date = as.Date(date))
+nasa_fusion <- nasa_fusion %>% mutate(date = as.Date(date))
+
+# Joining the weather_patched data frame with the NASA data
+weather_grand_fusion <- weather_patched %>%
+  left_join(nasa_fusion %>% select(location, date, Solar, Precip_NASA), 
+            by = c("location", "date")) %>%
+  left_join(co2_data, by = "Year") %>%
+  left_join(global_temp, by = "Year")
+
+# Extrapolating the 2025 and 2026 C02 levels and global temperatures
+weather_grand_fusion <- weather_grand_fusion %>%
+  mutate(
+    CO2 = ifelse(is.na(CO2) & Year >= 2025, 425 + (Year - 2024)*2.5, CO2),
+    Global_Anomaly = ifelse(is.na(Global_Anomaly) & Year >= 2025, 1.2, Global_Anomaly)
+  )
+
+# Obtaining NOAA Oceanic Nino Index data
+oni_raw <- download_oni()
+
+# Categorizing the Oceanic Nino Index data into El Nino, La Nina, or neutral
+enso_yearly <- oni_raw %>%
+  group_by(Year) %>%
+  summarize(
+    ENSO_Index = mean(ONI, na.rm = TRUE),
+    ENSO_Phase = case_when(
+      ENSO_Index >= 0.5 ~ "El Nino",
+      ENSO_Index <= -0.5 ~ "La Nina",
+      TRUE ~ "Neutral"
+    )
+  )
+```
+
+```{r}
+# Combining all the data frames together into one large data frame
+weather_final_fusion <- weather_grand_fusion %>%
+  left_join(enso_yearly, by = "Year") %>%
+  mutate(
+    lat = case_when(
+      location == "washingtondc" ~ 38.8853,   
+      location == "kyoto"        ~ 35.0119, 
+      location == "liestal"      ~ 47.4814,
+      location == "vancouver"    ~ 49.2237,
+      location == "nyc"          ~ 40.7304
+    )
+  )
+
+weather_final_fusion$DayLength <- as.numeric(mapply(function(l, d) {
+  daylength(l, yday(d))[3]
+}, weather_final_fusion$lat, weather_final_fusion$date))
+```
+
+All the variables that needed to be obtained are in one large data frame called "weather_final_fusion". Below the predicted temperatures for February, March, and early April are manually imputed.
+
+```{r}
+# Maually Typing in data from Accu Weather
+manual_forecast_2026 <- tribble(
+  ~location,      ~date,         ~Tmax, ~Tmin,
+  "washingtondc", "2026-02-01",  -4,    -11,
+  "washingtondc", "2026-02-02",  0,     -9,  
+  "washingtondc", "2026-02-03",  1,     -8,
+  "washingtondc", "2026-02-04",  1,     -7,
+  "washingtondc", "2026-02-05",  2,     -4,
+  "washingtondc", "2026-02-06",  3,     -4,
+  "washingtondc", "2026-02-07",  3,     -7,
+  "washingtondc", "2026-02-08",  -2,    -1,
+  "washingtondc", "2026-02-09",  -1,    -7,
+  "washingtondc", "2026-02-10",  3,     -6,
+  "washingtondc", "2026-02-11",  2,     -2,
+  "washingtondc", "2026-02-12",  3,     -5,
+  "washingtondc", "2026-02-13",  3,     -3,
+  "washingtondc", "2026-02-14",  6,     2,
+  "washingtondc", "2026-02-15",  13,    2,
+  "washingtondc", "2026-02-16",  13,    -5,
+  "washingtondc", "2026-02-17",  8,     -6,
+  "washingtondc", "2026-02-18",  4,     -6,
+  "washingtondc", "2026-02-19",  4,     -2,
+  "washingtondc", "2026-02-20",  12,    2,
+  "washingtondc", "2026-02-21",  11,    -2,
+  "washingtondc", "2026-02-22",  5,     -5,
+  "washingtondc", "2026-02-23",  4,     -5,
+  "washingtondc", "2026-02-24",  4,     -3,
+  "washingtondc", "2026-02-25",  6,     3,
+  "washingtondc", "2026-02-26",  12,    4,
+  "washingtondc", "2026-02-27",  15,    3,
+  "washingtondc", "2026-02-28",  8,     0,
+  "washingtondc", "2026-03-01",  8,     -2,
+  "washingtondc", "2026-03-02",  7,     1,
+  "washingtondc", "2026-03-03",  7,     0,
+  "washingtondc", "2026-03-04",  7,     -3,
+  "washingtondc", "2026-03-05",  6,     -3,
+  "washingtondc", "2026-03-06",  7,     -3,
+  "washingtondc", "2026-03-07",  7,     -3,
+  "washingtondc", "2026-03-08",  7,     -3,
+  "washingtondc", "2026-03-09",  7,     -2,
+  "washingtondc", "2026-03-10",  8,     -2,
+  "washingtondc", "2026-03-11",  8,     2,
+  "washingtondc", "2026-03-12",  11,    -1,
+  "washingtondc", "2026-03-13",  11,    1,
+  "washingtondc", "2026-03-14",  11,    1,
+  "washingtondc", "2026-03-15",  13,    0,
+  "washingtondc", "2026-03-16",  11,    -1,
+  "washingtondc", "2026-03-17",  9,     -1,
+  "washingtondc", "2026-03-18",  9,     0,
+  "washingtondc", "2026-03-19",  11,    5,
+  "washingtondc", "2026-03-20",  11,    7,
+  "washingtondc", "2026-03-21",  17,    6,
+  "washingtondc", "2026-03-22",  15,    7,
+  "washingtondc", "2026-03-23",  16,    3,
+  "washingtondc", "2026-03-24",  18,    3,
+  "washingtondc", "2026-03-25",  16,    9,
+  "washingtondc", "2026-03-26",  16,    3,
+  "washingtondc", "2026-03-27",  19,    0,
+  "washingtondc", "2026-03-28",  13,    1,
+  "washingtondc", "2026-03-29",  12,    2,
+  "washingtondc", "2026-03-30",  13,    9,
+  "washingtondc", "2026-03-31",  18,    9,
+  "washingtondc", "2026-04-01",  18,    6,
+  "washingtondc", "2026-04-02",  17,    2,
+  "washingtondc", "2026-04-03",  14,    2,
+  "washingtondc", "2026-04-04",  14,    6,
+  "washingtondc", "2026-04-05",  18,    9,
+  "washingtondc", "2026-04-06",  20,    4,
+  "washingtondc", "2026-04-07",  16,    11,
+  "washingtondc", "2026-04-08",  21,    10,
+  "washingtondc", "2026-04-09",  22,    6,
+  "washingtondc", "2026-04-10",  19,    5,
+  "washingtondc", "2026-04-11",  18,    12,
+  "washingtondc", "2026-04-12",  18,    11,
+  "washingtondc", "2026-04-13",  24,    8,
+  "washingtondc", "2026-04-14",  24,    6,
+  "washingtondc", "2026-04-15",  16,    9,
+  "kyoto", "2026-02-01",  10,    -1,
+  "kyoto", "2026-02-02",  10,    0,  
+  "kyoto", "2026-02-03",  8,     -2,
+  "kyoto", "2026-02-04",  11,    0,
+  "kyoto", "2026-02-05",  13,    3,
+  "kyoto", "2026-02-06",  12,    4,
+  "kyoto", "2026-02-07",  6,     -4,
+  "kyoto", "2026-02-08",  10,    -3,
+  "kyoto", "2026-02-09",  11,    -1,
+  "kyoto", "2026-02-10",  10,    0,
+  "kyoto", "2026-02-11",  9,     2,
+  "kyoto", "2026-02-12",  9,     4,
+  "kyoto", "2026-02-13",  12,    1,
+  "kyoto", "2026-02-14",  8,     0,
+  "kyoto", "2026-02-15",  8,     -1,
+  "kyoto", "2026-02-16",  7,     0,
+  "kyoto", "2026-02-17",  8,     -1,
+  "kyoto", "2026-02-18",  8,     -1,
+  "kyoto", "2026-02-19",  8,     -1,
+  "kyoto", "2026-02-20",  9,     0,
+  "kyoto", "2026-02-21",  9,     -1,
+  "kyoto", "2026-02-22",  9,     0,
+  "kyoto", "2026-02-23",  10,    0,
+  "kyoto", "2026-02-24",  9,     -1,
+  "kyoto", "2026-02-25",  9,     1,
+  "kyoto", "2026-02-26",  8,     0,
+  "kyoto", "2026-02-27",  8,     0,
+  "kyoto", "2026-02-28",  9,     1,
+  "kyoto", "2026-03-01",  8,     0,
+  "kyoto", "2026-03-02",  8,     -1,
+  "kyoto", "2026-03-03",  9,     0,
+  "kyoto", "2026-03-04",  9,     0,
+  "kyoto", "2026-03-05",  9,     -1,
+  "kyoto", "2026-03-06",  10,    0,
+  "kyoto", "2026-03-07",  13,    1,
+  "kyoto", "2026-03-08",  12,    1,
+  "kyoto", "2026-03-09",  11,    0,
+  "kyoto", "2026-03-10",  12,    2,
+  "kyoto", "2026-03-11",  10,    1,
+  "kyoto", "2026-03-12",  11,    1,
+  "kyoto", "2026-03-13",  12,    2,
+  "kyoto", "2026-03-14",  11,    1,
+  "kyoto", "2026-03-15",  11,    6,
+  "kyoto", "2026-03-16",  13,    3,
+  "kyoto", "2026-03-17",  14,    2,
+  "kyoto", "2026-03-18",  12,    2,
+  "kyoto", "2026-03-19",  13,    2,
+  "kyoto", "2026-03-20",  13,    1,
+  "kyoto", "2026-03-21",  13,    6,
+  "kyoto", "2026-03-22",  17,    7,
+  "kyoto", "2026-03-23",  17,    3,
+  "kyoto", "2026-03-24",  18,    2,
+  "kyoto", "2026-03-25",  16,    2,
+  "kyoto", "2026-03-26",  14,    4,
+  "kyoto", "2026-03-27",  14,    1,
+  "kyoto", "2026-03-28",  14,    3,
+  "kyoto", "2026-03-29",  15,    3,
+  "kyoto", "2026-03-30",  15,    5,
+  "kyoto", "2026-03-31",  15,    9,
+  "kyoto", "2026-04-01",  16,    5,
+  "kyoto", "2026-04-02",  18,    4,
+  "kyoto", "2026-04-03",  16,    4,
+  "kyoto", "2026-04-04",  16,    7,
+  "kyoto", "2026-04-05",  19,    6,
+  "kyoto", "2026-04-06",  20,    9,
+  "kyoto", "2026-04-07",  21,    9,
+  "kyoto", "2026-04-08",  22,    10,
+  "kyoto", "2026-04-09",  22,    8,
+  "kyoto", "2026-04-10",  21,    11,
+  "kyoto", "2026-04-11",  19,    11,
+  "kyoto", "2026-04-12",  22,    11,
+  "kyoto", "2026-04-13",  22,    11,
+  "kyoto", "2026-04-14",  23,    9,
+  "kyoto", "2026-04-15",  22,    7,
+  "liestal", "2026-02-01",  5,     1,
+  "liestal", "2026-02-02",  5,     2,  
+  "liestal", "2026-02-03",  6,     2,
+  "liestal", "2026-02-04",  6,     0,
+  "liestal", "2026-02-05",  7,     1,
+  "liestal", "2026-02-06",  5,     3,
+  "liestal", "2026-02-07",  8,     2,
+  "liestal", "2026-02-08",  7,     1,
+  "liestal", "2026-02-09",  5,     1,
+  "liestal", "2026-02-10",  4,     0,
+  "liestal", "2026-02-11",  4,     0,
+  "liestal", "2026-02-12",  4,     0,
+  "liestal", "2026-02-13",  5,     1,
+  "liestal", "2026-02-14",  6,     1,
+  "liestal", "2026-02-15",  6,     1,
+  "liestal", "2026-02-16",  7,     1,
+  "liestal", "2026-02-17",  8,     2,
+  "liestal", "2026-02-18",  7,     1,
+  "liestal", "2026-02-19",  7,     2,
+  "liestal", "2026-02-20",  7,     2,
+  "liestal", "2026-02-21",  7,     -2,
+  "liestal", "2026-02-22",  4,     -4,
+  "liestal", "2026-02-23",  4,     -4,
+  "liestal", "2026-02-24",  7,     0,
+  "liestal", "2026-02-25",  5,     -3,
+  "liestal", "2026-02-26",  3,     -4,
+  "liestal", "2026-02-27",  2,     -4,
+  "liestal", "2026-02-28",  3,     -3,
+  "liestal", "2026-03-01",  3,     -4,
+  "liestal", "2026-03-02",  3,     -3,
+  "liestal", "2026-03-03",  6,     -3,
+  "liestal", "2026-03-04",  4,     -3,
+  "liestal", "2026-03-05",  4,     -3,
+  "liestal", "2026-03-06",  5,     -3,
+  "liestal", "2026-03-07",  7,     2,
+  "liestal", "2026-03-08",  9,     3,
+  "liestal", "2026-03-09",  8,     -1,
+  "liestal", "2026-03-10",  5,     -1,
+  "liestal", "2026-03-11",  6,     3,
+  "liestal", "2026-03-12",  7,     1,
+  "liestal", "2026-03-13",  11,    1,
+  "liestal", "2026-03-14",  7,     -1,
+  "liestal", "2026-03-15",  7,     0,
+  "liestal", "2026-03-16",  7,     -1,
+  "liestal", "2026-03-17",  7,     3,
+  "liestal", "2026-03-18",  9,     1,
+  "liestal", "2026-03-19",  10,    2,
+  "liestal", "2026-03-20",  11,    0,
+  "liestal", "2026-03-21",  12,    0,
+  "liestal", "2026-03-22",  8,     -1,
+  "liestal", "2026-03-23",  8,     0,
+  "liestal", "2026-03-24",  11,    4,
+  "liestal", "2026-03-25",  13,    5,
+  "liestal", "2026-03-26",  14,    6,
+  "liestal", "2026-03-27",  14,    5,
+  "liestal", "2026-03-28",  14,    4,
+  "liestal", "2026-03-29",  14,    0,
+  "liestal", "2026-03-30",  10,    0,
+  "liestal", "2026-03-31",  13,    2,
+  "liestal", "2026-04-01",  14,    1,
+  "liestal", "2026-04-02",  15,    2,
+  "liestal", "2026-04-03",  14,    5,
+  "liestal", "2026-04-04",  16,    2,
+  "liestal", "2026-04-05",  16,    0,
+  "liestal", "2026-04-06",  11,    0,
+  "liestal", "2026-04-07",  10,    3,
+  "liestal", "2026-04-08",  11,    4,
+  "liestal", "2026-04-09",  14,    3,
+  "liestal", "2026-04-10",  11,    2,
+  "liestal", "2026-04-11",  12,    1,
+  "liestal", "2026-04-12",  11,    2,
+  "liestal", "2026-04-13",  11,    3,
+  "liestal", "2026-04-14",  11,    1,
+  "liestal", "2026-04-15",  12,    1,
+  "vancouver", "2026-02-01",  10,    7,
+  "vancouver", "2026-02-02",  10,    8,  
+  "vancouver", "2026-02-03",  14,    8,
+  "vancouver", "2026-02-04",  14,    7,
+  "vancouver", "2026-02-05",  14,    7,
+  "vancouver", "2026-02-06",  14,    6,
+  "vancouver", "2026-02-07",  12,    7,
+  "vancouver", "2026-02-08",  12,    8,
+  "vancouver", "2026-02-09",  11,    6,
+  "vancouver", "2026-02-10",  11,    4,
+  "vancouver", "2026-02-11",  10,    5,
+  "vancouver", "2026-02-12",  9,     2,
+  "vancouver", "2026-02-13",  6,     0,
+  "vancouver", "2026-02-14",  5,     -2,
+  "vancouver", "2026-02-15",  3,     -1,
+  "vancouver", "2026-02-16",  4,     -2,
+  "vancouver", "2026-02-17",  5,     -2,
+  "vancouver", "2026-02-18",  5,     -1,
+  "vancouver", "2026-02-19",  5,     -2,
+  "vancouver", "2026-02-20",  6,     -1,
+  "vancouver", "2026-02-21",  5,     0,
+  "vancouver", "2026-02-22",  5,     -1,
+  "vancouver", "2026-02-23",  6,     -1,
+  "vancouver", "2026-02-24",  6,     0,
+  "vancouver", "2026-02-25",  6,     -1,
+  "vancouver", "2026-02-26",  5,     -2,
+  "vancouver", "2026-02-27",  5,     -2,
+  "vancouver", "2026-02-28",  6,     -1,
+  "vancouver", "2026-03-01",  6,     -2,
+  "vancouver", "2026-03-02",  6,     -2,
+  "vancouver", "2026-03-03",  6,     -1,
+  "vancouver", "2026-03-04",  6,     -1,
+  "vancouver", "2026-03-05",  6,     0,
+  "vancouver", "2026-03-06",  6,     1,
+  "vancouver", "2026-03-07",  7,     0,
+  "vancouver", "2026-03-08",  7,     0,
+  "vancouver", "2026-03-09",  7,     0,
+  "vancouver", "2026-03-10",  8,     1,
+  "vancouver", "2026-03-11",  8,     0,
+  "vancouver", "2026-03-12",  8,     1,
+  "vancouver", "2026-03-13",  13,    3,
+  "vancouver", "2026-03-14",  13,    5,
+  "vancouver", "2026-03-15",  13,    4,
+  "vancouver", "2026-03-16",  12,    4,
+  "vancouver", "2026-03-17",  10,    5,
+  "vancouver", "2026-03-18",  11,    6,
+  "vancouver", "2026-03-19",  13,    4,
+  "vancouver", "2026-03-20",  12,    1,
+  "vancouver", "2026-03-21",  10,    1,
+  "vancouver", "2026-03-22",  9,     1,
+  "vancouver", "2026-03-23",  9,     1,
+  "vancouver", "2026-03-24",  11,    1,
+  "vancouver", "2026-03-25",  9,     2,
+  "vancouver", "2026-03-26",  9,     4,
+  "vancouver", "2026-03-27",  13,    3,
+  "vancouver", "2026-03-28",  10,    3,
+  "vancouver", "2026-03-29",  9,     3,
+  "vancouver", "2026-03-30",  9,     5,
+  "vancouver", "2026-03-31",  9,     6,
+  "vancouver", "2026-04-01",  10,    6,
+  "vancouver", "2026-04-02",  13,    3,
+  "vancouver", "2026-04-03",  10,    3,
+  "vancouver", "2026-04-04",  10,    4,
+  "vancouver", "2026-04-05",  10,    3,
+  "vancouver", "2026-04-06",  10,    3,
+  "vancouver", "2026-04-07",  11,    5,
+  "vancouver", "2026-04-08",  12,    4,
+  "vancouver", "2026-04-09",  11,    4,
+  "vancouver", "2026-04-10",  12,    4,
+  "vancouver", "2026-04-11",  11,    4,
+  "vancouver", "2026-04-12",  12,    4,
+  "vancouver", "2026-04-13",  13,    5,
+  "vancouver", "2026-04-14",  14,    5,
+  "vancouver", "2026-04-15",  14,    5,
+  "nyc", "2026-02-01",  -4,    -10,
+  "nyc", "2026-02-02",  -2,    -8,  
+  "nyc", "2026-02-03",  0,     -6,
+  "nyc", "2026-02-04",  -1,    -7,
+  "nyc", "2026-02-05",  -3,    -8,
+  "nyc", "2026-02-06",  -2,    -4,
+  "nyc", "2026-02-07",  -2,    -12,
+  "nyc", "2026-02-08",  -6,    -11,
+  "nyc", "2026-02-09",  -9,    -12,
+  "nyc", "2026-02-10",  -5,    -9,
+  "nyc", "2026-02-11",  -2,    -7,
+  "nyc", "2026-02-12",  -2,    -2,
+  "nyc", "2026-02-13",  0,     -4,
+  "nyc", "2026-02-14",  2,     0,
+  "nyc", "2026-02-15",  7,     2,
+  "nyc", "2026-02-16",  9,     -5,
+  "nyc", "2026-02-17",  3,     -6,
+  "nyc", "2026-02-18",  1,     -7,
+  "nyc", "2026-02-19",  1,     -4,
+  "nyc", "2026-02-20",  8,     1,
+  "nyc", "2026-02-21",  9,     0,
+  "nyc", "2026-02-22",  3,     -5,
+  "nyc", "2026-02-23",  2,     -5,
+  "nyc", "2026-02-24",  2,     -4,
+  "nyc", "2026-02-25",  6,     2,
+  "nyc", "2026-02-26",  9,     4,
+  "nyc", "2026-02-27",  11,    3,
+  "nyc", "2026-02-28",  7,     0,
+  "nyc", "2026-03-01",  8,     -2,
+  "nyc", "2026-03-02",  4,     -3,
+  "nyc", "2026-03-03",  4,     -3,
+  "nyc", "2026-03-04",  4,     -3,
+  "nyc", "2026-03-05",  4,     -3,
+  "nyc", "2026-03-06",  4,     -3,
+  "nyc", "2026-03-07",  4,     -3,
+  "nyc", "2026-03-08",  4,     -3,
+  "nyc", "2026-03-09",  5,     -3,
+  "nyc", "2026-03-10",  5,     -2,
+  "nyc", "2026-03-11",  7,     3,
+  "nyc", "2026-03-12",  6,     1,
+  "nyc", "2026-03-13",  10,    1,
+  "nyc", "2026-03-14",  8,     0,
+  "nyc", "2026-03-15",  9,     -1,
+  "nyc", "2026-03-16",  8,     -2,
+  "nyc", "2026-03-17",  5,     -2,
+  "nyc", "2026-03-18",  5,     -1,
+  "nyc", "2026-03-19",  7,     4,
+  "nyc", "2026-03-20",  8,     7,
+  "nyc", "2026-03-21",  13,    7,
+  "nyc", "2026-03-22",  13,    6,
+  "nyc", "2026-03-23",  13,    6,
+  "nyc", "2026-03-24",  14,    4,
+  "nyc", "2026-03-25",  13,    7,
+  "nyc", "2026-03-26",  14,    2,
+  "nyc", "2026-03-27",  16,    0,
+  "nyc", "2026-03-28",  15,    0,
+  "nyc", "2026-03-29",  9,     1,
+  "nyc", "2026-03-30",  10,    7,
+  "nyc", "2026-03-31",  12,    8,
+  "nyc", "2026-04-01",  15,    6,
+  "nyc", "2026-04-02",  15,    3,
+  "nyc", "2026-04-03",  11,    2,
+  "nyc", "2026-04-04",  11,    4,
+  "nyc", "2026-04-05",  14,    8,
+  "nyc", "2026-04-06",  16,    6,
+  "nyc", "2026-04-07",  13,    10,
+  "nyc", "2026-04-08",  18,    9,
+  "nyc", "2026-04-09",  19,    5,
+  "nyc", "2026-04-10",  17,    5,
+  "nyc", "2026-04-11",  17,    10,
+  "nyc", "2026-04-12",  17,    6,
+  "nyc", "2026-04-13",  21,    5,
+  "nyc", "2026-04-14",  17,    5,
+  "nyc", "2026-04-15",  13,    7,
+) %>%
+  mutate(date = as.Date(date))
+```
+
+Since the predicted weather data has been manually made into a tibble, it will be joined with the overall data. However, before it is joined, the C02 levels, global temperature, solar radiation and weather patterns will need to be imputed into the 2026 rows. The C02 levels and the global temperature index from 2025 will be used since we are only predicting the cherry blossoms into April. The data for 2026 is not yet available for C02 levels, solar radiation, and global temperature index, so it is estimated using the 2025 information and visible patterns.
+
+```{r}
+# Estimating the C02 and ENSO levels again and adding the Year, Global temperatures, and estimating the solar radiation levels again to ensure all gaps for 2026 are filled.  
+
+full_2026_calendar <- expand.grid(
+  date = seq(as.Date("2026-02-01"), as.Date("2026-04-15"), by = "day"),
+  location = c("washingtondc", "kyoto", "liestal", "vancouver", "nyc")
+) %>%
+  as_tibble() %>%
+  mutate(
+    Year = 2026,
+    CO2 = 430,
+    Global_Anomaly = 1.2,
+    ENSO_Index = -0.7,
+    Solar = 15
+  )
+```
+
+The predicted weather data for 2026 is added to the weather_final fusion data frame below.
+
+```{r}
+#Adding the 2026 weather data
+forecast_2026_final <- full_2026_calendar %>%
+  left_join(manual_forecast_2026, by = c("location", "date")) %>%
+  # If there is manual data missing it is filled it with a generic average so the code will not crash
+  mutate(
+    Tmax = ifelse(is.na(Tmax), 10, Tmax), 
+    Tmin = ifelse(is.na(Tmin), 1, Tmin))
+
+weather_full_sequence <- bind_rows(weather_final_fusion, forecast_2026_final)
+```
+
+Since the temperatures have been added, the next crucial step is to calculate growing degree days (GDD) and chilling requirements, which is the amount of time the plant stays dormant.
+
+```{r}
+# Organizing by the location, date, and year
+weather_final_biological <- weather_full_sequence %>%
+  arrange(location, date) %>%
+  group_by(location, Year) %>%
+  mutate(
+    # Calculating Growing Degree days
+    Daily_Heat = pmax(((Tmax + Tmin) / 2) - 5, 0),
+    GDD_Cumulative = cumsum(Daily_Heat),
+    
+    # Calculating the days where the plant was dormant
+    Is_Chill_Day = ifelse(((Tmax + Tmin) / 2) >= 0 & ((Tmax + Tmin) / 2) <= 7, 1, 0),
+    Chill_Cumulative = cumsum(Is_Chill_Day)
+  ) %>%
+  ungroup()
+```
+
+### 3. Cleaning the Data
+
+The next step is to clean the data.
+
+The cherry blossom prediction dates are added.
+
+```{r}
+# Merging the bloom dates into the weather data by location and year
+model_data_final <- weather_final_biological %>%
+  left_join(cherry_updated %>% select(location, year, bloom_doy), 
+            by = c("location", "Year" = "year")) %>%
+  # Keeping only the days each year from Jan 1st until the bloom happened. All the dates for 2026 are kept because the bloom date is unknown
+  filter(yday(date) <= bloom_doy | Year == 2026) %>%
+  # Filling in any remaining NAs for the Growing degree days column
+  filter(!is.na(GDD_Cumulative))
+
+# Verifying if all the years before 2026 have a bloom date
+model_data_final %>% 
+  group_by(location, Year) %>% 
+  summarize(max_gdd = max(GDD_Cumulative), bloom_day = first(bloom_doy)) %>%
+  tail()
+```
+
+There are multiple columns with the same data. The precipitation columns are combined into one column called "Precip_Master". The "prcp", "Precip" and "Precip_NASA" are removed. The weather pattern data is alo difficult to understand without the El Nino or La Nina labels. A column is added called "ENSO_Phase" for comprehensibility.
+
+```{r}
+weather_clean <- model_data_final %>%
+  mutate(
+    # Using coalesce to prioritize Precip_NASA and then filling in the NAs with the precipitation data from NOAA.
+    Precip_Master = coalesce(Precip_NASA, Precip),
+    
+    # Filling in all remaining  NAs from the precipitation column with 0
+    Precip_Master = ifelse(is.na(Precip_Master), 0, Precip_Master)
+  ) %>%
+  #Removing columns with redundant information
+  select(-prcp, -Precip, -Precip_NASA, -tmax, -tmin) %>%
+  
+  # Verifying the 2026 columns have no NAs except for the bloom date
+  group_by(location) %>%
+  fill(CO2, Global_Anomaly, ENSO_Index, .direction = "downup") %>%
+  ungroup()
+```
+
+The next step is to patch the solar data before 1981 so the random forest does not ignore the rows before that year. This code calculates the average solar radiation for every location and day of the year combination across the entire data set and uses it to fill the gaps.Because the solar data is only available since 1981, it is extrapolated to fill in the years before then.
+
+```{r}
+weather_clean <- weather_clean %>%
+  # Creating a day of year column
+  mutate(doy = yday(date)) %>%
+  
+  # Calculating the average solar radiation for each day and location
+  group_by(location, doy) %>%
+  mutate(
+    # If some solar radiation data is still NA, those days will be filled in with the mean of the solar data of that same day from other years
+    Solar = ifelse(is.na(Solar), mean(Solar, na.rm = TRUE), Solar)
+  ) %>%
+  
+  # If any NAs remain (ex: leap years), it will be filled with the nearest value
+  group_by(location) %>%
+  mutate(Solar = zoo::na.approx(Solar, na.rm = FALSE)) %>%
+  fill(Solar, .direction = "downup") %>%
+  ungroup()
+```
+
+Switzerland had duplicate rows, the correct bloom doy is 86 for 2025, so the rows that contain 93 will be deleted.
+
+```{r}
+weather_clean <- weather_clean %>%
+  # Remove the incorrect 2025 bloom record for Liestal
+  filter(!(location == "liestal" & Year == 2025 & bloom_doy == 93)) %>%
+  # Removing any remaining duplicates
+  distinct(location, date, .keep_all = TRUE)
+```
+
+### 4. Creating the Training and Test Sets
+
+Before running the random forest, it is necessary to create a training and test data set from the weather_clean data to have something to compare the predictions to.
+
+```{r}
+# Preparing the data by sorting it into training and test sets
+# Organizing the test set into yearly summaries
+model_features <- weather_clean %>%
+  group_by(location, Year) %>%
+  summarize(
+    # Summarizing and filtering the variables to be used
+    max_GDD = max(GDD_Cumulative, na.rm = TRUE),
+    max_Chill = max(Chill_Cumulative, na.rm = TRUE),
+    avg_Tmax = mean(Tmax, na.rm = TRUE),
+    avg_Tmin = mean(Tmin, na.rm = TRUE),
+    CO2_level = mean(CO2, na.rm = TRUE),
+    Global_Temp = mean(Global_Anomaly, na.rm = TRUE),
+    ENSO_Phase = first(ENSO_Phase),
+    bloom_doy = first(bloom_doy),
+    .groups = "drop"
+  )
+
+# Splitting the data into training (past years) and prediction sets (2026)
+train_df <- model_features %>% filter(Year < 2026 & !is.na(bloom_doy))
+predict_df <- model_features %>% filter(Year == 2026)
+```
+
+Before creating the random forest model, an average bloom date window is created from the bloom dates from the past ten years to restrict the predictions from being too extreme, since average global temperatures and global C02 levels may have an extreme effect.
+
+```{r}
+historical_windows <- train_df %>%
+  filter(Year >= 2016 & Year <= 2025) %>%
+  group_by(location) %>%
+  summarize(
+    mean_doy = mean(bloom_doy, na.rm = TRUE),
+    earliest_ever = floor(mean_doy - 5), 
+    latest_ever = floor(mean_doy + 5),
+    .groups = "drop"
+  )
+print(historical_windows)
+```
+
+### 5. Running the Model
+
+Below the random forest model is created.
+
+```{r}
+# Creating the random forest model
+rf_recipe <- recipe(bloom_doy ~ location + max_GDD + max_Chill + 
+                    avg_Tmax + avg_Tmin + CO2_level + Global_Temp + ENSO_Phase, 
+                    data = train_df)
+
+set.seed(356)
+
+rf_spec <- rand_forest(trees = 500, mtry = 3, min_n = 5) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("regression")
+
+rf_workflow <- workflow() %>%
+  add_recipe(rf_recipe) %>%
+  add_model(rf_spec)
+
+# Training the model
+rf_fit <- fit(rf_workflow, data = train_df)
+```
+
+### 6. The Predictions
+
+The predictions for the five cities are calculated. Date ranges were applied to each city based on historical data, if the predictions fell outside the recent historical window, the prediction date for 2026 would be forced inside the window to ensure more accurate predictions.
+
+```{r}
+final_predictions_avg <- augment(rf_fit, predict_df) %>%
+  rename(predicted_doy = .pred) %>%
+  left_join(historical_windows, by = "location") %>%
+  mutate(
+    #Constrain predictions to the 10-year min/max
+    constrained_doy = pmax(earliest_ever, pmin(predicted_doy, latest_ever)),
+    
+    final_doy = round(constrained_doy),
+    predicted_date = as.Date(final_doy - 1, origin = "2026-01-01")
+  )
+```
+
+The prediction dates can now be viewed:
+
+```{r}
+final_output_avg <- final_predictions_avg %>% 
+  mutate(
+    # Rounding the day of year to the nearest whole number in the table
+    predicted_doy = round(constrained_doy) 
+  ) %>%
+  select(location, predicted_date, predicted_doy)
+
+print(final_output_avg)
+```
